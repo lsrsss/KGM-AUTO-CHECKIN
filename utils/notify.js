@@ -159,15 +159,27 @@ async function sendDiscord(title, content, webhookUrl) {
   return resp.ok
 }
 
+// 邮件头部非 ASCII 文本按 RFC 2047 编码；纯 ASCII 原样返回，避免多余编码。
+function encodeMailHeader(text) {
+  const s = String(text ?? '').trim()
+  if (!s) return ''
+  if (/^[\x20-\x7e]*$/.test(s)) return s
+  return `=?UTF-8?B?${Buffer.from(s, 'utf8').toString('base64')}?=`
+}
+
 // 10. 邮箱 SMTP（使用 node:net/node:tls 实现最小 SMTP 客户端）
 // 支持隐式 TLS（端口 465）和 STARTTLS（端口 587/25）。
 // 安全约束：凭据仅在「已加密连接 + 服务器声明 AUTH 能力」后发送；
 // 若无法建立加密连接则直接失败，绝不明文传输密码。
+// cfg.to 为目标收件人；from / fromName 可选，默认发件人即认证账号，
+// 这样同一套 SMTP 凭据既能发给管理员，也能按账号发给用户本人。
 function sendMailSMTP(title, content, cfg) {
   return new Promise((resolve, reject) => {
-    const { host, port, user, pass, to } = cfg
-    const from = user
-    const subject = `=?UTF-8?B?${Buffer.from(title).toString('base64')}?=`
+    const { host, port, user, pass, to, fromName } = cfg
+    const from = cfg.from || user
+    const subject = encodeMailHeader(title)
+    // 带显示名时用 "名称 <地址>" 形式，显示名按 RFC 2047 编码
+    const fromHeader = fromName ? `${encodeMailHeader(fromName)} <${from}>` : from
     const date = new Date().toUTCString()
     const messageId = `<${Date.now()}.${Math.random().toString(36).slice(2)}@kgcheckin>`
 
@@ -176,7 +188,7 @@ function sendMailSMTP(title, content, cfg) {
     const safeContent = String(content).replace(/^\./gm, '..')
 
     const mailBody = [
-      `From: ${from}`,
+      `From: ${fromHeader}`,
       `To: ${to}`,
       `Subject: ${subject}`,
       `Date: ${date}`,
@@ -462,6 +474,7 @@ async function sendNotify(title, content) {
         user: process.env.MAIL_USER,
         pass: process.env.MAIL_PASS,
         to: process.env.MAIL_TO,
+        fromName: process.env.MAIL_FROM_NAME || '酷狗签到助手',
       }),
     })
   }
@@ -492,4 +505,4 @@ async function sendNotify(title, content) {
   printYellow(`通知发送完成: ${success} 成功, ${fail} 失败`)
 }
 
-export { sendNotify }
+export { sendNotify, sendMailSMTP }

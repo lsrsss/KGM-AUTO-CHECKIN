@@ -73,6 +73,52 @@ function pickApiEnv(overrides = {}) {
   return { ...out, ...overrides }
 }
 
+/**
+ * 转发 api 子进程 stdout 里的 [ERR] 日志块（含多行续行）。
+ *
+ * api 用 `console.log('[ERR]', url, { status, body })` 记录失败：第一行只有 URL，
+ * 酷狗返回的 error_code / msg 在随后由 Node 展开的多行对象里。只按行过滤含
+ * [ERR] 的行会把这部分丢掉，日志里照样看不到失败原因。因此这里把 [ERR] 之后
+ * 直到下一条 [OK]/[ERR] 标记之前的行都归入同一块，整体输出。
+ *
+ * 之所以不全量转发：[OK] 每个请求都打一行，签到高峰期会刷屏。
+ *
+ * @param {NodeJS.ReadableStream} stream 子进程 stdout
+ * @param {(block: string) => void} [write] 输出函数（便于测试替换）
+ */
+function pipeApiErrors(stream, write = (block) => console.log('[api]', block)) {
+  stream.setEncoding('utf8')
+  let buffer = ''
+  let block = null // 当前 [ERR] 日志块（数组，按行）
+  const flush = () => {
+    if (!block) return
+    const text = block.join('\n').trimEnd()
+    block = null
+    if (text) write(text)
+  }
+  const handleLine = (line) => {
+    if (line.startsWith('[ERR]')) {
+      flush()
+      block = [line]
+    } else if (line.startsWith('[OK]')) {
+      flush()
+    } else if (block) {
+      block.push(line) // [ERR] 块内的续行
+    }
+  }
+  stream.on('data', (chunk) => {
+    buffer += chunk
+    const lines = buffer.split('\n')
+    buffer = lines.pop() // 末尾可能是半行，留到下一块
+    for (const line of lines) handleLine(line)
+  })
+  stream.on('end', () => {
+    if (buffer) handleLine(buffer)
+    buffer = ''
+    flush()
+  })
+}
+
 /** 启动 api 服务（detached 使其成为独立进程组，便于整组强杀） */
 function startService() {
   // 直接以 node 运行 api/app.js（与 npm run apiService → node app.js 等价）：
@@ -86,11 +132,11 @@ function startService() {
     env: pickApiEnv({ PORT: apiPort() }),
   })
 
-  api.stdout.on('data', () => {})
   api.stderr.on('data', data => {
     const msg = String(data).trim()
     if (msg) console.log('[api stderr]', msg)
   })
+  pipeApiErrors(api.stdout)
   api.on('close', code => console.log(`[api] 子进程退出，code=${code}`))
 
   return api

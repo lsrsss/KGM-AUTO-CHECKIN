@@ -133,6 +133,24 @@ const guid = cryptoMd5(getGuid());
 const serverDev = randomString(10).toUpperCase();
 
 /**
+ * 读取设备标识类环境变量，把「未设置 / 空字符串 / 纯空白」统一视为未设置。
+ *
+ * docker-compose.yml 用 `KUGOU_API_MID: ${KUGOU_API_MID:-}` 透传，.env 未配置时
+ * 变量会以空串进入容器；而 `process.env.X ?? fallback` 只对 null/undefined 回退，
+ * 空串会原样透出，导致请求的 mid 为空，酷狗返回 status=0 / error_code=20006
+ * （err appid(srcappid) or clientver or mid or dfid）。
+ *
+ * @param {string} key - 环境变量名
+ * @returns {string|undefined} 去空白后的值；未设置或为空白时返回 undefined
+ */
+function readEnvValue(key) {
+  const raw = process.env[key];
+  if (typeof raw !== 'string') return undefined;
+  const value = raw.trim();
+  return value === '' ? undefined : value;
+}
+
+/**
  * .env 环境变量配置文件路径
  * 优先从项目根目录加载，如果文件存在则通过 dotenv 读取其中的环境变量
  * @type {string}
@@ -329,19 +347,20 @@ async function consturctServer(moduleDefs) {
       res.append('Set-Cookie', `${key}=${cookies[key]}${cookieSuffix}`);
     };
 
-    // 获取 env guid
-    const env_guid = isUUIDv4(process.env.KUGOU_API_GUID) ? cryptoMd5(process.env.KUGOU_API_GUID) : process.env.KUGOU_API_GUID;
+    // 获取 env guid（空串按未设置处理，否则会以空 GUID 参与签名）
+    const env_guid_raw = readEnvValue('KUGOU_API_GUID');
+    const env_guid = isUUIDv4(env_guid_raw) ? cryptoMd5(env_guid_raw) : env_guid_raw;
 
     // 计算设备 MID（基于 GUID 的衍生标识）；KUGOU_API_MID 环境变量可显式覆盖（与上游一致，建议固定纯数字设备 ID）
-    const mid = process.env.KUGOU_API_MID ?? calculateMid(env_guid ?? guid);
+    const mid = readEnvValue('KUGOU_API_MID') ?? calculateMid(env_guid ?? guid);
 
     // 依次注入各平台标识 Cookie
     ensureCookie('KUGOU_API_PLATFORM', process.env.platform);
     ensureCookie('KUGOU_API_MID', mid);
     ensureCookie('KUGOU_API_GUID', env_guid ?? guid);
-    ensureCookie('KUGOU_API_DEV', (process.env.KUGOU_API_DEV ?? serverDev).toUpperCase());
-    ensureCookie('KUGOU_API_MAC', (process.env.KUGOU_API_MAC ?? '02:00:00:00:00:00').toUpperCase());
-    ensureCookie('KUGOU_API_WEBGL', process.env.KUGOU_API_WEBGL ?? generateWebGLHash());
+    ensureCookie('KUGOU_API_DEV', (readEnvValue('KUGOU_API_DEV') ?? serverDev).toUpperCase());
+    ensureCookie('KUGOU_API_MAC', (readEnvValue('KUGOU_API_MAC') ?? '02:00:00:00:00:00').toUpperCase());
+    ensureCookie('KUGOU_API_WEBGL', readEnvValue('KUGOU_API_WEBGL') ?? generateWebGLHash());
 
     // 将注入后的 cookies 回写到 req 对象上，供后续中间件和路由处理器使用
     req.cookies = cookies;

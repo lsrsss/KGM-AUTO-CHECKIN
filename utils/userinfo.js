@@ -8,6 +8,7 @@ import path from 'node:path'
 import { printBlue, printGreen, printRed, printYellow } from './colorOut.js'
 import { hasSecretWriteToken, setRepoSecret } from './githubSecrets.js'
 import { maskIdentifier, sanitizeForLog, shouldPrintSensitiveValue } from './safeLog.js'
+import { isValidDevice } from './device.js'
 
 /**
  * 解析 USERINFO JSON 文本。
@@ -28,7 +29,7 @@ function parseUserinfoJson(text) {
 /**
  * 将登录用户信息更新或追加到 userinfo 数组中
  * @param {Array} userinfo - 用户信息数组
- * @param {{ userid: string, token: string }} loginUser - 新登录的用户
+ * @param {{ userid: string, token: string, device?: object }} loginUser - 新登录的用户
  * @param {boolean} append - 是否追加模式（已存在则更新，否则添加）
  */
 function upsertUser(userinfo, loginUser, append) {
@@ -37,11 +38,17 @@ function upsertUser(userinfo, loginUser, append) {
       if (user.userid == loginUser.userid) {
         printYellow(`userid: ${maskIdentifier(user.userid)} 此账号已存在, 仅更新登录信息`)
         user.token = loginUser.token
+        // 重新登录 = 换用登录流程预生成的新设备标识（统一方案：所有账号每账号一套）
+        if (isValidDevice(loginUser.device)) {
+          user.device = { ...loginUser.device }
+        }
         return
       }
     }
   }
-  userinfo.push({ userid: loginUser.userid, token: loginUser.token })
+  const entry = { userid: loginUser.userid, token: loginUser.token }
+  if (isValidDevice(loginUser.device)) entry.device = { ...loginUser.device }
+  userinfo.push(entry)
 }
 
 /**

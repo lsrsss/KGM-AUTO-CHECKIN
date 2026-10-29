@@ -5,6 +5,7 @@ import { close_api, delay, send, startService, waitForApi } from "./utils/utils.
 import { printGreen, printMagenta, printRed, printYellow } from "./utils/colorOut.js";
 import { summarizeResponse } from "./utils/safeLog.js";
 import { upsertUser, saveUserinfo, parseUserinfoJson } from "./utils/userinfo.js";
+import { buildDeviceCookie, generateDevice } from "./utils/device.js";
 
 const require = createRequire(import.meta.url)
 // 优先从常规 node_modules 解析（本地/全局安装场景），失败再回退到 Actions 构建产物中的 api/node_modules 硬编码路径
@@ -37,6 +38,22 @@ function appendSummary(markdown) {
   } catch (err) {
     console.warn(`[Summary] 写入失败：${err.message}`)
   }
+}
+
+/**
+ * 把本地 API 服务的失败响应拼成一行可读原因。
+ * 酷狗业务失败会带 error_code（如 20006 = appid/clientver/mid/dfid 不对）；
+ * 本地网络/代理异常只有 msg（api 侧构造的 `{ status: 0, msg }`）。
+ * @param {any} r 本地 API 返回的 JSON
+ * @returns {string} 形如 "status=0，error_code=20006，msg=err appid(srcappid) or ..."
+ */
+function formatApiFailure(r) {
+  const parts = [`status=${r?.status ?? 'unknown'}`]
+  const errorCode = r?.error_code ?? r?.errcode
+  if (errorCode !== undefined && errorCode !== null) parts.push(`error_code=${errorCode}`)
+  const msg = r?.msg || r?.error_msg || r?.message
+  if (msg) parts.push(`msg=${String(msg).slice(0, 200)}`)
+  return parts.join('，')
 }
 
 /**
@@ -167,9 +184,15 @@ async function genMode() {
 
   try {
     const qrItems = []
+    // 每个二维码预生成一套设备标识并随 KEYS_FILE 持久化——
+    // Actions 里 gen 与 wait 是两个独立 step，设备标识必须跨 step 复用，
+    // 保证扫码会话与最终落盘的账号设备一致。
+    const devices = []
 
     for (let n = 0; n < number; n++) {
-      const result = await send(`/login/qr/key?timestrap=${Date.now()}`, "GET", {})
+      const device = generateDevice()
+      devices.push(device)
+      const result = await send(`/login/qr/key?timestrap=${Date.now()}`, "GET", { cookie: buildDeviceCookie(device) })
       if (result.status === 1) {
         const qrcode = result.data.qrcode
         const qrUrl = `https://h5.kugou.com/apps/loginQRCode/html/index.html?qrcode=${qrcode}`
@@ -179,7 +202,7 @@ async function genMode() {
       } else {
         printRed("响应内容")
         console.dir(summarizeResponse(result), { depth: null })
-        throw new Error(`获取二维码密钥失败：接口返回 status=${result.status}`)
+        throw new Error(`获取二维码密钥失败：接口返回 ${formatApiFailure(result)}`)
       }
     }
 
@@ -200,7 +223,7 @@ async function genMode() {
       }
     }
 
-    fs.writeFileSync(KEYS_FILE, JSON.stringify({ number, keys }))
+    fs.writeFileSync(KEYS_FILE, JSON.stringify({ number, keys, devices }))
     printMagenta(`\n✅ 已生成 ${number} 个二维码。`)
     if (SUMMARY_FILE) {
       printMagenta(`🔗 请查看下一步「发布二维码图片直链」输出的可点击链接，浏览器打开即可直接扫码！`)
@@ -239,7 +262,7 @@ async function waitMode() {
   } catch {
     throw new Error('未找到二维码密钥文件，请确认已先运行「生成登录二维码图片」步骤')
   }
-  const { number, keys } = parsed
+  const { number, keys, devices } = parsed
   const USERINFO = process.env.USERINFO
   const APPEND_USER = process.env.APPEND_USER
   const userinfo = (USERINFO && APPEND_USER == "是") ? (parseUserinfoJson(USERINFO) || []) : []
@@ -259,7 +282,9 @@ async function waitMode() {
       let expireFlag = false
       for (let i = 0; i < 30; i++) {
         const timestrap = Date.now();
-        const res = await send(`/login/qr/check?key=${qrcode}&timestrap=${timestrap}`, "GET", {})
+        // 用 gen step 预生成并随 KEYS_FILE 传递的设备标识，保证扫码会话设备一致
+        const deviceCookie = buildDeviceCookie(devices?.[n])
+        const res = await send(`/login/qr/check?key=${qrcode}&timestrap=${timestrap}`, "GET", deviceCookie ? { cookie: deviceCookie } : {})
         const status = res?.data?.status
         switch (status) {
           case 0:
@@ -274,7 +299,7 @@ async function waitMode() {
             break
           case 4:
             printGreen("登录成功！")
-            upsertUser(userinfo, { userid: res.data.userid, token: res.data.token }, APPEND_USER == "是")
+            upsertUser(userinfo, { userid: res.data.userid, token: res.data.token, device: devices?.[n] }, APPEND_USER == "是")
             loggedIn = true
             break
           default:
